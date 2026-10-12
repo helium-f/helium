@@ -238,6 +238,7 @@ helium/core/disable-password-manager.patch
 helium/core/sql-auto-rollback-after-disk-full.patch
 helium/core/history-quarantine-corrupt-db.patch
 helium/core/bookmarks-validated-backup-recovery.patch
+helium/core/prefs-malformed-json-readonly.patch
 
 helium/settings/settings-page-icons.patch
 helium/settings/move-search-suggest.patch
