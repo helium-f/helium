@@ -1,0 +1,111 @@
+name: macOS test build (test/prs-1-4)
+
+# Manual trigger only. Chains up to 14 resumable <=6h phases (same pattern as
+# imputnet/helium-macos build.yml). Stops when a phase reports status != running.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-test-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  phase-01:
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: false
+
+  phase-02:
+    needs: phase-01
+    if: needs.phase-01.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-03:
+    needs: phase-02
+    if: needs.phase-02.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-04:
+    needs: phase-03
+    if: needs.phase-03.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-05:
+    needs: phase-04
+    if: needs.phase-04.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-06:
+    needs: phase-05
+    if: needs.phase-05.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-07:
+    needs: phase-06
+    if: needs.phase-06.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-08:
+    needs: phase-07
+    if: needs.phase-07.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-09:
+    needs: phase-08
+    if: needs.phase-08.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-10:
+    needs: phase-09
+    if: needs.phase-09.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-11:
+    needs: phase-10
+    if: needs.phase-10.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-12:
+    needs: phase-11
+    if: needs.phase-11.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-13:
+    needs: phase-12
+    if: needs.phase-12.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
+
+  phase-14:
+    needs: phase-13
+    if: needs.phase-13.outputs.status == 'running'
+    uses: ./.github/workflows/macos-build-phase.yml
+    with:
+      resume: true
