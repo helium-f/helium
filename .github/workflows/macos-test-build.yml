@@ -4,6 +4,7 @@ name: macOS test build (test/prs-1-4)
 # imputnet/helium-macos build.yml). Stops when a phase reports status != running.
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
