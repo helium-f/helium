@@ -8,6 +8,11 @@ on:
     tags-ignore:
       - '**'
   workflow_dispatch:
+    inputs:
+      macos_build:
+        description: Also run the chained macOS test build (test/prs-1-4 only)
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -148,3 +153,7 @@ jobs:
         run: |
           diff -u pruning.list pruning.list.gen
           diff -u domain_substitution.list domain_substitution.list.gen
+
+  macos-build:
+    if: ${{ inputs.macos_build }}
+    uses: ./.github/workflows/macos-test-build.yml
