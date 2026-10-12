@@ -79,6 +79,18 @@ jobs:
           for tool in sha1sum sha256sum md5sum; do
             ln -sf "$BREW_PREFIX/bin/g$tool" "$SHIMS/$tool"
           done
+          # sccache's GitHub Actions cache backend needs ACTIONS_CACHE_URL, which run steps
+          # do not receive, and sccache has no local fallback. Use a pass-through wrapper so
+          # the compiler runs directly; resumed phases rely on checkpointed outputs, not a cache.
+          cat > "$SHIMS/sccache" <<'SHIM'
+          #!/bin/bash
+          case "${1:-}" in
+            --version) echo "sccache pass-through shim"; exit 0 ;;
+            --show-stats|--start-server|--stop-server) exit 0 ;;
+          esac
+          exec "$@"
+          SHIM
+          chmod +x "$SHIMS/sccache"
           echo "$SHIMS" >> "$GITHUB_PATH"
           export PATH="$SHIMS:$PATH"
           for tool in greadlink gsync timeout sha256sum sccache zstd ditto codesign xattr; do
