@@ -237,6 +237,7 @@ helium/core/ridiculous-google-compat-exceptions.patch
 helium/core/disable-password-manager.patch
 helium/core/sql-auto-rollback-after-disk-full.patch
 helium/core/history-quarantine-corrupt-db.patch
+helium/core/bookmarks-validated-backup-recovery.patch
 
 helium/settings/settings-page-icons.patch
 helium/settings/move-search-suggest.patch
