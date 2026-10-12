@@ -13,7 +13,7 @@
    // PopulateNodeIdsForLocalOrSyncablePermanentNodes() must have been invoked
 --- a/components/bookmarks/browser/bookmark_load_details.cc
 +++ b/components/bookmarks/browser/bookmark_load_details.cc
-@@ -117,6 +117,34 @@ void BookmarkLoadDetails::PopulateNodeIdsForLocalOrSyncablePermanentNodes() {
+@@ -117,6 +117,33 @@ void BookmarkLoadDetails::PopulateNodeIdsForLocalOrSyncablePermanentNodes() {
    }
  }
  
@@ -81,7 +81,7 @@
  void ReadBookmarksInSecondaryFileAndVerifyContentOnBackgroundSequence(
      std::string primary_json_string,
      scoped_refptr<const os_crypt_async::Encryptor> encryptor,
-@@ -329,30 +347,78 @@ std::unique_ptr<BookmarkLoadDetails> LoadBookmarks(
+@@ -329,42 +347,84 @@ std::unique_ptr<BookmarkLoadDetails> LoadBookmarks(
      const StorageFileEncryptionType local_or_syncable_encryption_type =
          local_or_syncable_storage_file_read_config
              .primary_source_encryption_type;
@@ -200,7 +200,7 @@
  
 --- a/components/bookmarks/browser/model_loader_unittest.cc
 +++ b/components/bookmarks/browser/model_loader_unittest.cc
-@@ -333,6 +333,103 @@ TEST(ModelLoaderTest, LoadEmptyFromImproperlyEncodedJSON) {
+@@ -333,6 +333,91 @@ TEST(ModelLoaderTest, LoadEmptyFromImproperlyEncodedJSON) {
        /*expected_count=*/0);
  }
  

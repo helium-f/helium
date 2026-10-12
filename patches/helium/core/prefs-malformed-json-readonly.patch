@@ -29,7 +29,7 @@
  
    // The file should have been moved aside.
    EXPECT_FALSE(PathExists(invalid_file));
-@@ -224,6 +224,27 @@ TEST_P(JsonPrefStoreTest, InvalidFile) {
+@@ -224,6 +224,26 @@ TEST_P(JsonPrefStoreTest, InvalidFile) {
    EXPECT_EQ(kInvalidJson, moved_aside_contents);
  }
  
