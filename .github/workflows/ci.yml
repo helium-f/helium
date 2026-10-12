@@ -15,7 +15,7 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -155,5 +155,5 @@ jobs:
           diff -u domain_substitution.list domain_substitution.list.gen
 
   macos-build:
-    if: ${{ inputs.macos_build }}
+    if: ${{ github.event.inputs.macos_build == 'true' }}
     uses: ./.github/workflows/macos-test-build.yml
