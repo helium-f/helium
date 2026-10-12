@@ -1,19 +1,19 @@
 --- a/components/bookmarks/browser/bookmark_load_details.h
 +++ b/components/bookmarks/browser/bookmark_load_details.h
-@@ -115,6 +115,10 @@ class BookmarkLoadDetails {
-   // Assigns node IDs for local-or-syncable permanent nodes if not previously
+@@ -120,6 +120,10 @@
    // assigned/decoded.
    void PopulateNodeIdsForLocalOrSyncablePermanentNodes();
-+
+ 
 +  // Recreates the local-or-syncable permanent nodes after a failed decode so
 +  // another source can be decoded without retaining partially loaded state.
 +  void ResetLocalOrSyncablePermanentNodes();
- 
++
    // Adds managed nodes. May be called at most once.
    // PopulateNodeIdsForLocalOrSyncablePermanentNodes() must have been invoked
+   // before this function.
 --- a/components/bookmarks/browser/bookmark_load_details.cc
 +++ b/components/bookmarks/browser/bookmark_load_details.cc
-@@ -117,6 +117,33 @@ void BookmarkLoadDetails::PopulateNodeIdsForLocalOrSyncablePermanentNodes() {
+@@ -122,6 +122,33 @@
    }
  }
  
@@ -49,7 +49,7 @@
    CHECK(managed_node);
 --- a/components/bookmarks/browser/model_loader.cc
 +++ b/components/bookmarks/browser/model_loader.cc
-@@ -12,6 +12,8 @@
+@@ -13,6 +13,8 @@
  #include "base/json/json_reader.h"
  #include "base/json/json_string_value_serializer.h"
  #include "base/memory/scoped_refptr.h"
@@ -58,7 +58,7 @@
  #include "base/numerics/clamped_math.h"
  #include "base/synchronization/waitable_event.h"
  #include "base/task/bind_post_task.h"
-@@ -85,6 +87,22 @@ DeserializeStringToDict(std::string_view json_string) {
+@@ -91,6 +93,22 @@
    return std::move(*root).TakeDict();
  }
  
@@ -81,7 +81,7 @@
  void ReadBookmarksInSecondaryFileAndVerifyContentOnBackgroundSequence(
      std::string primary_json_string,
      scoped_refptr<const os_crypt_async::Encryptor> encryptor,
-@@ -329,42 +347,84 @@ std::unique_ptr<BookmarkLoadDetails> LoadBookmarks(
+@@ -334,42 +352,84 @@
      const StorageFileEncryptionType local_or_syncable_encryption_type =
          local_or_syncable_storage_file_read_config
              .primary_source_encryption_type;
@@ -185,7 +185,7 @@
        OnFileLoaded(metrics::StorageFileForUma::kLocalOrSyncable,
                     local_or_syncable_encryption_type,
                     local_or_syncable_storage_file_read_config,
-@@ -391,12 +457,6 @@ std::unique_ptr<BookmarkLoadDetails> LoadBookmarks(
+@@ -403,12 +463,6 @@
                            metrics::StorageFileForUma::kLocalOrSyncable,
                            local_or_syncable_file_path);
        }
@@ -200,10 +200,12 @@
  
 --- a/components/bookmarks/browser/model_loader_unittest.cc
 +++ b/components/bookmarks/browser/model_loader_unittest.cc
-@@ -333,6 +333,91 @@ TEST(ModelLoaderTest, LoadEmptyFromImproperlyEncodedJSON) {
+@@ -335,8 +335,93 @@
+       base::StrCat(
+           {kBookmarksFileLoadResultMetricName, ".Account", ".ClearText"}),
        /*expected_count=*/0);
- }
- 
++}
++
 +TEST(ModelLoaderTest, RecoverLocalBookmarksFromValidBackup) {
 +  base::test::TaskEnvironment task_environment;
 +  const base::FilePath temp_dir = base::CreateUniqueTempDirectoryScopedToTest();
@@ -233,8 +235,8 @@
 +  EXPECT_FALSE(base::PathExists(primary));
 +  EXPECT_TRUE(base::PathExists(primary.AddExtensionASCII("corrupt")));
 +  EXPECT_TRUE(base::PathExists(backup));
-+}
-+
+ }
+ 
 +TEST(ModelLoaderTest, RecoverLocalBookmarksAfterCodecFailure) {
 +  base::test::TaskEnvironment task_environment;
 +  const base::FilePath temp_dir = base::CreateUniqueTempDirectoryScopedToTest();
