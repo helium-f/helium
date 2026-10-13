@@ -8,9 +8,18 @@ on:
     tags-ignore:
       - '**'
   workflow_dispatch:
+    inputs:
+      macos_build:
+        description: Also run the chained macOS test build (test/prs-1-4 only)
+        type: boolean
+        default: false
+      macos_restore_test:
+        description: Build, archive with pax, extract in place, and check that nothing rebuilds
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -148,3 +157,109 @@ jobs:
         run: |
           diff -u pruning.list pruning.list.gen
           diff -u domain_substitution.list domain_substitution.list.gen
+
+  macos-build:
+    if: ${{ github.event.inputs.macos_build == 'true' }}
+    uses: ./.github/workflows/macos-test-build.yml
+
+  macos-restore-test:
+    if: ${{ github.event.inputs.macos_restore_test == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out imputnet/helium-macos (platform tree)
+        uses: actions/checkout@v4
+        with:
+          repository: imputnet/helium-macos
+          ref: f72c3d768237dec1a630ed87b897b041b851343c
+          submodules: false
+          persist-credentials: false
+
+      - name: Check out this branch as helium-chromium
+        uses: actions/checkout@v4
+        with:
+          path: helium-chromium
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Copy CI scripts
+        run: |
+          set -eux
+          cp -va ./.github/scripts/ ./
+
+      - name: Prepare Xcode and free disk
+        run: |
+          set -eux
+          ./github_prepare_xcode.sh
+          if [ -n "${ANDROID_HOME:-}" ]; then sudo rm -rf "$ANDROID_HOME"; fi
+          sudo mdutil -a -i off || true
+          df -h /
+
+      - name: Install toolchain and GNU tool shims
+        run: |
+          set -eux
+          ./github_setup_env_toolchain.sh
+          brew install zstd || true
+          BREW_PREFIX="$(brew --prefix)"
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          ln -sf "$BREW_PREFIX/bin/gtimeout" "$SHIMS/timeout"
+          for tool in sha1sum sha256sum md5sum; do
+            ln -sf "$BREW_PREFIX/bin/g$tool" "$SHIMS/$tool"
+          done
+          # sccache's GitHub Actions cache backend needs ACTIONS_CACHE_URL, which run steps
+          # do not receive, and sccache has no local fallback. Use a pass-through wrapper so
+          # the compiler runs directly; resumed phases rely on checkpointed outputs, not a cache.
+          cat > "$SHIMS/sccache" <<'SHIM'
+          #!/bin/bash
+          case "${1:-}" in
+            --version) echo "sccache pass-through shim"; exit 0 ;;
+            --show-stats|--start-server|--stop-server) exit 0 ;;
+          esac
+          exec "$@"
+          SHIM
+          chmod +x "$SHIMS/sccache"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+          export PATH="$SHIMS:$PATH"
+          for tool in greadlink gsync timeout sha256sum sccache zstd ditto codesign xattr; do
+            command -v "$tool"
+          done
+          sccache --version
+
+      - name: Fetch sources and configure
+        run: |
+          set -o pipefail
+          source ./devutils/shared.sh
+          prepare_sources arm64 true 2>&1 | tee -a github_actions_prepare_arm64.log
+          rm -rf build/download_cache
+          configure_build arm64 true false 2>&1 | tee -a github_actions_build_arm64.log
+
+      - name: Restore-fidelity test (pax round trip, then rebuild the same objects)
+        run: |
+          set -uo pipefail
+          TARGETS=(obj/third_party/abseil-cpp/absl/time/clock_interface/clock_interface.o obj/third_party/abseil-cpp/absl/status/statusor/statusor.o obj/third_party/abseil-cpp/absl/time/internal/cctz/civil_time/civil_time_detail.o obj/third_party/abseil-cpp/absl/time/internal/cctz/time_zone/time_zone_fixed.o obj/third_party/abseil-cpp/absl/synchronization/kernel_timeout_internal/kernel_timeout.o obj/third_party/abseil-cpp/absl/base/malloc_internal/low_level_alloc.o obj/third_party/abseil-cpp/absl/status/status_builder/status_builder.o obj/third_party/abseil-cpp/absl/random/internal/randen_hwaes/randen_detect.o obj/third_party/abseil-cpp/absl/crc/crc32c/crc_non_temporal_memcpy.o obj/third_party/abseil-cpp/absl/log/log_entry/log_entry.o obj/third_party/abseil-cpp/absl/strings/cord_internal/cord_internal.o obj/third_party/abseil-cpp/absl/base/base/spinlock.o obj/third_party/abseil-cpp/absl/random/seed_sequences/seed_sequences.o obj/third_party/abseil-cpp/absl/random/internal/randen_slow/randen_slow.o obj/third_party/abseil-cpp/absl/random/internal/seed_material/seed_material.o)
+          cd build/src
+          export SISO_PATH="$PWD/third_party/siso/cipd/siso"
+          echo "== fresh build of ${#TARGETS[@]} objects"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/fresh.txt" 2>&1
+          echo "fresh rc=$?"; grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/fresh.txt" | tail -1
+          echo "== control rerun (expect 0 steps)"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/control.txt" 2>&1
+          grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/control.txt" | tail -1
+          cd ../..
+          echo "== archive build/src with pax (uncompressed)"
+          tar --format pax -C build -c -f "$RUNNER_TEMP/src.tar" src
+          ls -l "$RUNNER_TEMP/src.tar"
+          echo "== delete build/src and extract in place"
+          rm -rf build/src
+          tar -C build -xf "$RUNNER_TEMP/src.tar"
+          cd build/src
+          export SISO_PATH="$PWD/third_party/siso/cipd/siso"
+          echo "== after pax round trip (expect 0 steps)"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/after.txt" 2>&1
+          echo "after rc=$?"; grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/after.txt" | tail -1
+          echo "stale-deps reasons in new explain log: $(grep -c stale-deps out/Default/siso_explain 2>/dev/null || echo 0)"

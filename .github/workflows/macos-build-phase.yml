@@ -1,0 +1,214 @@
+name: macOS build phase
+
+# One <=6h job of the chained unsigned Helium build. Mirrors imputnet/helium-macos
+# building.yml / build-phase.yml, but checks out this branch as helium-chromium and
+# skips signing/notarization (no secrets in this fork).
+
+on:
+  workflow_call:
+    inputs:
+      resume:
+        description: Restore the previous checkpoint instead of fetching sources
+        required: true
+        type: boolean
+    outputs:
+      status:
+        description: running = checkpoint saved for next phase; finished = app packaged; failed = error
+        value: ${{ jobs.build.outputs.status }}
+
+permissions:
+  contents: read
+
+env:
+  PLATFORM_REPO: imputnet/helium-macos
+  PLATFORM_REF: f72c3d768237dec1a630ed87b897b041b851343c
+
+jobs:
+  build:
+    name: Build Helium arm64 (${{ inputs.resume && 'resume' || 'first phase' }})
+    runs-on: macos-latest
+    timeout-minutes: 360
+    outputs:
+      status: ${{ steps.build.outcome == 'success' && steps.build.outputs.status || 'failed' }}
+    steps:
+      - name: Check out imputnet/helium-macos (platform tree)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PLATFORM_REPO }}
+          ref: ${{ env.PLATFORM_REF }}
+          submodules: false
+          persist-credentials: false
+
+      - name: Check out this branch as helium-chromium
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: helium-chromium
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Copy CI scripts and start job timer
+        run: |
+          set -eux
+          cp -va ./.github/scripts/ ./
+          date +%s > ./epoch_job_start.txt
+          df -h /
+
+      - name: Prepare Xcode and free disk
+        run: |
+          set -eux
+          ./github_prepare_xcode.sh
+          if [ -n "${ANDROID_HOME:-}" ]; then sudo rm -rf "$ANDROID_HOME"; fi
+          sudo mdutil -a -i off || true
+          df -h /
+
+      - name: Install toolchain and GNU tool shims
+        run: |
+          set -eux
+          ./github_setup_env_toolchain.sh
+          brew install zstd || true
+          BREW_PREFIX="$(brew --prefix)"
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          ln -sf "$BREW_PREFIX/bin/gtimeout" "$SHIMS/timeout"
+          for tool in sha1sum sha256sum md5sum; do
+            ln -sf "$BREW_PREFIX/bin/g$tool" "$SHIMS/$tool"
+          done
+          # sccache's GitHub Actions cache backend needs ACTIONS_CACHE_URL, which run steps
+          # do not receive, and sccache has no local fallback. Use a pass-through wrapper so
+          # the compiler runs directly; resumed phases rely on checkpointed outputs, not a cache.
+          cat > "$SHIMS/sccache" <<'SHIM'
+          #!/bin/bash
+          case "${1:-}" in
+            --version) echo "sccache pass-through shim"; exit 0 ;;
+            --show-stats|--start-server|--stop-server) exit 0 ;;
+          esac
+          exec "$@"
+          SHIM
+          chmod +x "$SHIMS/sccache"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+          export PATH="$SHIMS:$PATH"
+          for tool in greadlink gsync timeout sha256sum sccache zstd ditto codesign xattr; do
+            command -v "$tool"
+          done
+          sccache --version
+
+      - name: Restore previous logs
+        if: ${{ inputs.resume }}
+        uses: actions/download-artifact@v4
+        with:
+          name: github_build_logs_arm64
+
+      - name: Restore previous checkpoint
+        if: ${{ inputs.resume }}
+        uses: actions/download-artifact@v4
+        with:
+          name: github_build_artifact_arm64
+
+      - name: Unpack previous checkpoint
+        if: ${{ inputs.resume }}
+        run: ./github_unpack_archive.sh
+
+      - name: Fetch Chromium and Helium sources, then configure (first phase only)
+        if: ${{ !inputs.resume }}
+        run: |
+          set -o pipefail
+          source ./devutils/shared.sh
+          prepare_sources arm64 true 2>&1 | tee -a github_actions_prepare_arm64.log
+          rm -rf build/download_cache
+          configure_build arm64 true false 2>&1 | tee -a github_actions_build_arm64.log
+          df -h /
+
+      - name: Probe restored state (resume phases only)
+        if: ${{ inputs.resume }}
+        run: |
+          set -uo pipefail
+          cd build/src
+          export SISO_PATH="$PWD/third_party/siso/cipd/siso"
+          python3 third_party/depot_tools/autoninja.py -C out/Default chrome chromedriver chrome/installer/mac > "$RUNNER_TEMP/probe.txt" 2>&1 &
+          PROBE=$!
+          sleep 300
+          pkill -INT -f 'autoninja.py' || true
+          pkill -INT -f 'third_party/siso/cipd/siso' || true
+          wait "$PROBE" || true
+          sleep 20
+          pkill -KILL -f 'third_party/siso/cipd/siso' || true
+          cd ../..
+          cat "$RUNNER_TEMP/probe.txt" >> github_actions_build_arm64.log
+          TOTAL=$(grep -o -E '\[[0-9]+/[0-9]+\]' "$RUNNER_TEMP/probe.txt" | head -1 | sed -E 's/.*\/([0-9]+)\]/\1/')
+          echo "steps planned for this phase: ${TOTAL:-unknown}"
+          if [ -n "${TOTAL:-}" ] && [ "$TOTAL" -ge 70000 ]; then
+            echo "::error::restored state is not incremental ($TOTAL steps planned); stopping the chain"
+            exit 1
+          fi
+
+      - name: Build for this phase
+        id: build
+        run: |
+          set -o pipefail
+          ./github_build.sh arm64 2>&1 | tee -a github_actions_build_arm64.log
+
+      - name: Archive checkpoint for the next phase
+        id: checkpoint
+        if: ${{ steps.build.outcome == 'success' && steps.build.outputs.status == 'running' }}
+        run: |
+          set -eux
+          gsync --file-system build/src
+          tar --format pax -C build -c -f - src | zstd -T0 -6 -o build_src.tar.zst
+          sha256sum ./build_src.tar.zst | tee ./sums.txt
+          mkdir -p upload_part_build
+          mv build_src.tar.zst sums.txt upload_part_build/
+          ls -lh upload_part_build/
+
+      - name: Upload checkpoint
+        if: ${{ steps.checkpoint.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: github_build_artifact_arm64
+          path: upload_part_build/
+          overwrite: true
+
+      - name: Package unsigned Helium.app
+        id: package
+        if: ${{ steps.build.outcome == 'success' && steps.build.outputs.status == 'finished' }}
+        run: |
+          set -eux
+          APP="build/src/out/Default/Helium.app"
+          test -d "$APP"
+          VERSION="$(python3 helium-chromium/utils/helium_version.py --tree helium-chromium --platform-tree . --print)"
+          xattr -cr "$APP"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP" || echo "::warning::codesign verification failed"
+          mkdir -p release_asset
+          ZIP="release_asset/helium_${VERSION}_arm64-macos-unsigned.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          ls -lh release_asset/
+
+      - name: Upload unsigned app zip
+        if: ${{ steps.package.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: helium-macos-arm64-unsigned
+          path: release_asset/
+          if-no-files-found: error
+
+      - name: Collect logs
+        if: ${{ always() }}
+        run: |
+          mkdir -p upload_logs
+          cp -v ./*.log upload_logs/ 2>/dev/null || true
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: github_build_logs_arm64
+          path: upload_logs/
+          overwrite: true
+          if-no-files-found: ignore
