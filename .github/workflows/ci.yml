@@ -223,21 +223,24 @@ jobs:
       - name: Unpack checkpoint
         run: ./github_unpack_archive.sh
 
-      - name: Diagnose dirty state
+      - name: Touch outputs and measure pending steps
         run: |
           set -uo pipefail
           cd build/src
-          echo "== siso reason log (last phase-7 run): head"
-          head -c 2500 out/Default/siso_explain | cut -c1-300; echo
-          echo "== reason histogram"
-          grep -o -E '[Rr]eason[^,}"]{0,80}' out/Default/siso_explain | sort | uniq -c | sort -rn | head -15
-          echo "== per-job runner temp paths in state files"
-          grep -c '_temp/' out/Default/siso_explain out/Default/.siso_config out/Default/.ninja_log 2>/dev/null || true
-          grep -o -m3 '/Users/runner/work/_temp/[^ "]*' out/Default/siso_explain | head -3 || true
-          echo "== autoninja dry run with the build's targets"
           export SISO_PATH="$PWD/third_party/siso/cipd/siso"
-          python3 third_party/depot_tools/autoninja.py -C out/Default -n chrome chromedriver chrome/installer/mac > "$RUNNER_TEMP/autoninja-dry.txt" 2>&1
-          echo "autoninja rc=$?"
-          tail -4 "$RUNNER_TEMP/autoninja-dry.txt" | cut -c1-240
-          echo "== siso dry run summary lines"
-          grep -E 'Build Succeeded|steps|pending|Ready' "$RUNNER_TEMP/autoninja-dry.txt" | head -5 | cut -c1-240 || true
+          echo "== touching every restored file under out/Default to the current time"
+          find out/Default -type f -exec touch {} +
+          echo "touched files: $(find out/Default -type f | wc -l)"
+          echo "== real start for 240s (not a dry run), then interrupt"
+          python3 third_party/depot_tools/autoninja.py -C out/Default chrome chromedriver chrome/installer/mac > "$RUNNER_TEMP/after.txt" 2>&1 &
+          PID=$!
+          sleep 240
+          pkill -INT -f 'autoninja.py' || true
+          pkill -INT -f 'siso' || true
+          wait "$PID" || true
+          echo "== schedule lines"
+          grep -E 'build start: Ready|schedule pending' "$RUNNER_TEMP/after.txt" | head -4
+          echo "== first progress markers (the second number is the steps to run)"
+          grep -o -E '\[[0-9]+/[0-9]+\]' "$RUNNER_TEMP/after.txt" | head -3
+          echo "== stale-deps reasons in the new explain log"
+          grep -c 'stale-deps' out/Default/siso_explain 2>/dev/null || true
