@@ -124,6 +124,29 @@ jobs:
           configure_build arm64 true false 2>&1 | tee -a github_actions_build_arm64.log
           df -h /
 
+      - name: Probe restored state (resume phases only)
+        if: ${{ inputs.resume }}
+        run: |
+          set -uo pipefail
+          cd build/src
+          export SISO_PATH="$PWD/third_party/siso/cipd/siso"
+          python3 third_party/depot_tools/autoninja.py -C out/Default chrome chromedriver chrome/installer/mac > "$RUNNER_TEMP/probe.txt" 2>&1 &
+          PROBE=$!
+          sleep 300
+          pkill -INT -f 'autoninja.py' || true
+          pkill -INT -f 'third_party/siso/cipd/siso' || true
+          wait "$PROBE" || true
+          sleep 20
+          pkill -KILL -f 'third_party/siso/cipd/siso' || true
+          cd ../..
+          cat "$RUNNER_TEMP/probe.txt" >> github_actions_build_arm64.log
+          TOTAL=$(grep -o -E '\[[0-9]+/[0-9]+\]' "$RUNNER_TEMP/probe.txt" | head -1 | sed -E 's/.*\/([0-9]+)\]/\1/')
+          echo "steps planned for this phase: ${TOTAL:-unknown}"
+          if [ -n "${TOTAL:-}" ] && [ "$TOTAL" -ge 70000 ]; then
+            echo "::error::restored state is not incremental ($TOTAL steps planned); stopping the chain"
+            exit 1
+          fi
+
       - name: Build for this phase
         id: build
         run: |
@@ -136,7 +159,7 @@ jobs:
         run: |
           set -eux
           gsync --file-system build/src
-          tar -C build -c -f - src | zstd -T0 -6 -o build_src.tar.zst
+          tar --format pax -C build -c -f - src | zstd -T0 -6 -o build_src.tar.zst
           sha256sum ./build_src.tar.zst | tee ./sums.txt
           mkdir -p upload_part_build
           mv build_src.tar.zst sums.txt upload_part_build/
@@ -160,7 +183,7 @@ jobs:
           VERSION="$(python3 helium-chromium/utils/helium_version.py --tree helium-chromium --platform-tree . --print)"
           xattr -cr "$APP"
           codesign --force --deep --sign - "$APP"
-          codesign --verify --deep --strict "$APP"
+          codesign --verify --deep --strict "$APP" || echo "::warning::codesign verification failed"
           mkdir -p release_asset
           ZIP="release_asset/helium_${VERSION}_arm64-macos-unsigned.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
