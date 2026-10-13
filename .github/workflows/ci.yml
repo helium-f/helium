@@ -13,6 +13,10 @@ on:
         description: Also run the chained macOS test build (test/prs-1-4 only)
         type: boolean
         default: false
+      macos_diagnose:
+        description: Restore the failed run's checkpoint and explain why it is dirty
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -157,3 +161,90 @@ jobs:
   macos-build:
     if: ${{ github.event.inputs.macos_build == 'true' }}
     uses: ./.github/workflows/macos-test-build.yml
+
+  macos-diagnose:
+    if: ${{ github.event.inputs.macos_diagnose == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out imputnet/helium-macos (platform tree)
+        uses: actions/checkout@v4
+        with:
+          repository: imputnet/helium-macos
+          ref: f72c3d768237dec1a630ed87b897b041b851343c
+          submodules: false
+          persist-credentials: false
+
+      - name: Check out this branch as helium-chromium
+        uses: actions/checkout@v4
+        with:
+          path: helium-chromium
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install toolchain and GNU tool shims
+        run: |
+          set -eux
+          cp -va ./.github/scripts/ ./
+          ./github_setup_env_toolchain.sh
+          brew install zstd || true
+          BREW_PREFIX="$(brew --prefix)"
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          ln -sf "$BREW_PREFIX/bin/gtimeout" "$SHIMS/timeout"
+          for tool in sha1sum sha256sum md5sum; do
+            ln -sf "$BREW_PREFIX/bin/g$tool" "$SHIMS/$tool"
+          done
+          cat > "$SHIMS/sccache" <<'SHIM'
+          #!/bin/bash
+          case "${1:-}" in
+            --version) echo "sccache pass-through shim"; exit 0 ;;
+            --show-stats|--start-server|--stop-server) exit 0 ;;
+          esac
+          exec "$@"
+          SHIM
+          chmod +x "$SHIMS/sccache"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+
+      - name: Download checkpoint from the failed build run
+        uses: actions/download-artifact@v4
+        with:
+          name: github_build_artifact_arm64
+          run-id: 38204427810
+          github-token: ${{ github.token }}
+
+      - name: Unpack checkpoint
+        run: ./github_unpack_archive.sh
+
+      - name: Diagnose dirty state
+        run: |
+          set -uo pipefail
+          cd build/src
+          echo "== object files in out/Default: $(find out/Default -name '*.o' | wc -l)"
+          echo "== state files in out/Default:"
+          ls -la out/Default | grep -E 'build[.]ninja|args[.]gn|ninja|siso|[.]d$' | head -30 || true
+          echo "== siso dry run"
+          ./third_party/siso/cipd/siso ninja -C out/Default -n chrome/installer/mac > "$RUNNER_TEMP/siso-dry.txt" 2>&1
+          echo "siso rc=$?"
+          tail -5 "$RUNNER_TEMP/siso-dry.txt"
+          echo "== ninja explain (dry run)"
+          NINJA=""
+          for cand in third_party/ninja/ninja third_party/depot_tools/ninja; do
+            if [ -x "$cand" ]; then NINJA="$cand"; break; fi
+          done
+          if [ -z "$NINJA" ] && command -v ninja >/dev/null 2>&1; then NINJA="$(command -v ninja)"; fi
+          echo "ninja binary: ${NINJA:-none}"
+          if [ -n "$NINJA" ]; then
+            "$NINJA" -C out/Default -n -d explain chrome/installer/mac > "$RUNNER_TEMP/explain.txt" 2>&1
+            echo "ninja rc=$?"
+            echo "explain lines: $(grep -c 'ninja explain' "$RUNNER_TEMP/explain.txt" || true)"
+            grep -o -E 'ninja explain: [^/]*' "$RUNNER_TEMP/explain.txt" | sort | uniq -c | sort -rn | head -20
+            grep -E 'ninja explain' "$RUNNER_TEMP/explain.txt" | head -30 | cut -c1-240
+          fi
