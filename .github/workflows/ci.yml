@@ -13,8 +13,8 @@ on:
         description: Also run the chained macOS test build (test/prs-1-4 only)
         type: boolean
         default: false
-      macos_diagnose:
-        description: Restore the failed run's checkpoint and explain why it is dirty
+      macos_restore_test:
+        description: Build, archive with pax, extract in place, and check that nothing rebuilds
         type: boolean
         default: false
 
@@ -162,13 +162,10 @@ jobs:
     if: ${{ github.event.inputs.macos_build == 'true' }}
     uses: ./.github/workflows/macos-test-build.yml
 
-  macos-diagnose:
-    if: ${{ github.event.inputs.macos_diagnose == 'true' }}
+  macos-restore-test:
+    if: ${{ github.event.inputs.macos_restore_test == 'true' }}
     runs-on: macos-latest
-    timeout-minutes: 120
-    permissions:
-      contents: read
-      actions: read
+    timeout-minutes: 150
     steps:
       - name: Check out imputnet/helium-macos (platform tree)
         uses: actions/checkout@v4
@@ -189,10 +186,22 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install toolchain and GNU tool shims
+      - name: Copy CI scripts
         run: |
           set -eux
           cp -va ./.github/scripts/ ./
+
+      - name: Prepare Xcode and free disk
+        run: |
+          set -eux
+          ./github_prepare_xcode.sh
+          if [ -n "${ANDROID_HOME:-}" ]; then sudo rm -rf "$ANDROID_HOME"; fi
+          sudo mdutil -a -i off || true
+          df -h /
+
+      - name: Install toolchain and GNU tool shims
+        run: |
+          set -eux
           ./github_setup_env_toolchain.sh
           brew install zstd || true
           BREW_PREFIX="$(brew --prefix)"
@@ -202,6 +211,9 @@ jobs:
           for tool in sha1sum sha256sum md5sum; do
             ln -sf "$BREW_PREFIX/bin/g$tool" "$SHIMS/$tool"
           done
+          # sccache's GitHub Actions cache backend needs ACTIONS_CACHE_URL, which run steps
+          # do not receive, and sccache has no local fallback. Use a pass-through wrapper so
+          # the compiler runs directly; resumed phases rely on checkpointed outputs, not a cache.
           cat > "$SHIMS/sccache" <<'SHIM'
           #!/bin/bash
           case "${1:-}" in
@@ -212,35 +224,42 @@ jobs:
           SHIM
           chmod +x "$SHIMS/sccache"
           echo "$SHIMS" >> "$GITHUB_PATH"
+          export PATH="$SHIMS:$PATH"
+          for tool in greadlink gsync timeout sha256sum sccache zstd ditto codesign xattr; do
+            command -v "$tool"
+          done
+          sccache --version
 
-      - name: Download checkpoint from the failed build run
-        uses: actions/download-artifact@v4
-        with:
-          name: github_build_artifact_arm64
-          run-id: 38204427810
-          github-token: ${{ github.token }}
+      - name: Fetch sources and configure
+        run: |
+          set -o pipefail
+          source ./devutils/shared.sh
+          prepare_sources arm64 true 2>&1 | tee -a github_actions_prepare_arm64.log
+          rm -rf build/download_cache
+          configure_build arm64 true false 2>&1 | tee -a github_actions_build_arm64.log
 
-      - name: Unpack checkpoint
-        run: ./github_unpack_archive.sh
-
-      - name: Touch outputs and measure pending steps
+      - name: Restore-fidelity test (pax round trip, then rebuild the same objects)
         run: |
           set -uo pipefail
+          TARGETS=(obj/third_party/abseil-cpp/absl/time/clock_interface/clock_interface.o obj/third_party/abseil-cpp/absl/status/statusor/statusor.o obj/third_party/abseil-cpp/absl/time/internal/cctz/civil_time/civil_time_detail.o obj/third_party/abseil-cpp/absl/time/internal/cctz/time_zone/time_zone_fixed.o obj/third_party/abseil-cpp/absl/synchronization/kernel_timeout_internal/kernel_timeout.o obj/third_party/abseil-cpp/absl/base/malloc_internal/low_level_alloc.o obj/third_party/abseil-cpp/absl/status/status_builder/status_builder.o obj/third_party/abseil-cpp/absl/random/internal/randen_hwaes/randen_detect.o obj/third_party/abseil-cpp/absl/crc/crc32c/crc_non_temporal_memcpy.o obj/third_party/abseil-cpp/absl/log/log_entry/log_entry.o obj/third_party/abseil-cpp/absl/strings/cord_internal/cord_internal.o obj/third_party/abseil-cpp/absl/base/base/spinlock.o obj/third_party/abseil-cpp/absl/random/seed_sequences/seed_sequences.o obj/third_party/abseil-cpp/absl/random/internal/randen_slow/randen_slow.o obj/third_party/abseil-cpp/absl/random/internal/seed_material/seed_material.o)
           cd build/src
           export SISO_PATH="$PWD/third_party/siso/cipd/siso"
-          echo "== touching every restored file under out/Default to the current time"
-          find out/Default -type f -exec touch {} +
-          echo "touched files: $(find out/Default -type f | wc -l)"
-          echo "== real start for 240s (not a dry run), then interrupt"
-          python3 third_party/depot_tools/autoninja.py -C out/Default chrome chromedriver chrome/installer/mac > "$RUNNER_TEMP/after.txt" 2>&1 &
-          PID=$!
-          sleep 240
-          pkill -INT -f 'autoninja.py' || true
-          pkill -INT -f 'siso' || true
-          wait "$PID" || true
-          echo "== schedule lines"
-          grep -E 'build start: Ready|schedule pending' "$RUNNER_TEMP/after.txt" | head -4
-          echo "== first progress markers (the second number is the steps to run)"
-          grep -o -E '\[[0-9]+/[0-9]+\]' "$RUNNER_TEMP/after.txt" | head -3
-          echo "== stale-deps reasons in the new explain log"
-          grep -c 'stale-deps' out/Default/siso_explain 2>/dev/null || true
+          echo "== fresh build of ${#TARGETS[@]} objects"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/fresh.txt" 2>&1
+          echo "fresh rc=$?"; grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/fresh.txt" | tail -1
+          echo "== control rerun (expect 0 steps)"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/control.txt" 2>&1
+          grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/control.txt" | tail -1
+          cd ../..
+          echo "== archive build/src with pax (uncompressed)"
+          tar --format pax -C build -c -f "$RUNNER_TEMP/src.tar" src
+          ls -l "$RUNNER_TEMP/src.tar"
+          echo "== delete build/src and extract in place"
+          rm -rf build/src
+          tar -C build -xf "$RUNNER_TEMP/src.tar"
+          cd build/src
+          export SISO_PATH="$PWD/third_party/siso/cipd/siso"
+          echo "== after pax round trip (expect 0 steps)"
+          python3 third_party/depot_tools/autoninja.py -C out/Default "${TARGETS[@]}" > "$RUNNER_TEMP/after.txt" 2>&1
+          echo "after rc=$?"; grep -E 'Build Succeeded|Build Failed' "$RUNNER_TEMP/after.txt" | tail -1
+          echo "stale-deps reasons in new explain log: $(grep -c stale-deps out/Default/siso_explain 2>/dev/null || echo 0)"
